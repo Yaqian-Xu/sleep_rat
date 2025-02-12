@@ -78,18 +78,8 @@ def short_fourier_transform(eeg_signal):
     psd = np.abs(Zxx) ** 2  # Estimate as squared magnitude of FFT
     return psd, frequencies, times
 
-def preprocess(edf_file):
-    with pyedflib.EdfReader(edf_file) as f:
-        num_signals = f.signals_in_file
-        print(f"Number of signals: {num_signals}")
-
-        original_fs = f.getSampleFrequency(0)
-        eeg_signal = f.readSignal(0)
-        print(f"EEG signal shape: {eeg_signal.shape}")
-        print(f"Length of EEG signal: {len(eeg_signal)}")
-
+def preprocess(eeg_signal, original_fs):
     # resample to 128 Hz
-    # print(f"Original frequency: {original_fs}")
     target_fs = 128
     eeg_signal_resampled = eeg_signal
     if(original_fs != target_fs):
@@ -117,31 +107,35 @@ def preprocess(edf_file):
     standardized_psd = (log_psd - np.mean(log_psd, axis=1, keepdims=True)) / np.std(log_psd, axis=1, keepdims=True)
     print(f"Shape of standardized_psd: {standardized_psd.shape}")
 
-    plot(times, frequencies[freq_mask], standardized_psd)
+    # plot(times, frequencies[freq_mask], standardized_psd)
 
 root_dir = os.getcwd()
 edf_dirA = root_dir + '/training_data/CohortA/recordings/'
 edf_dirB = root_dir + '/training_data/CohortB/recordings/'
 edf_dirC = root_dir + '/training_data/CohortC/recordings/'
 edf_dirD = root_dir + '/training_data/CohortD/recordings/'
+edf_dirs = [edf_dirA, edf_dirB, edf_dirC, edf_dirD]
 if __name__ == '__main__':
     # for cohort A and B @ 256 Hz hmmm
     # 1382401 / 10800 / 32 = 4 second epochs
     # for cohort C and D
     # 691201 / 21600 = 32
 
-    edf_file = edf_dirD+ 'D4.edf'
-    print("Processing: ", edf_file)
-
-    # with pyedflib.EdfReader(edf_file) as f:
-    #     num_signals = f.signals_in_file
-    #     print(f"Number of signals: {num_signals}")
-    #     for i in range (2):
-
-    #     original_fs = f.getSampleFrequency(0)
-    #     eeg_signal = f.readSignal(0)
-    #     print(f"EEG signal shape: {eeg_signal.shape}")
-    #     print(f"Length of EEG signal: {len(eeg_signal)}")
-        
-
-    preprocess(edf_file)
+    for edf_dir in edf_dirs:
+        print("Processing directory: ", edf_dir)
+        for filename in os.listdir(edf_dir):
+            if not filename.endswith('.edf'):
+                raise ValueError("File is not an EDF file")
+            edf_file = os.path.join(edf_dir, filename)
+            print("Processing: ", edf_file)
+            with pyedflib.EdfReader(edf_file) as f:
+                num_signals = f.signals_in_file
+                # print(f"Number of signals: {num_signals}")
+                for i in range (2):
+                    original_fs = f.getSampleFrequency(i)
+                    eeg_signal = f.readSignal(i)
+                    # print(f"EEG signal shape: {eeg_signal.shape}")
+                    # print(f"Length of EEG signal: {len(eeg_signal)}")
+                    # print(f"Original frequency: {original_fs}")
+                    preprocess(eeg_signal, original_fs)
+        print("")
