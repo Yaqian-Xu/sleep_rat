@@ -2,10 +2,11 @@ import numpy as np
 import scipy.signal as signal
 import pyedflib
 import matplotlib.pyplot as plt
-from scipy.fftpack import fft, fftfreq
+from scipy.fftpack import fft
 import torch
 import os
 import pandas as pd
+from tqdm import tqdm
 
 def plot(times, frequency, standardized_psd):
     start_time = 0
@@ -22,20 +23,6 @@ def plot(times, frequency, standardized_psd):
     plt.title('Spectrogram')
     plt.colorbar(label='')
     plt.show()
-
-def fast_fourier_transform(eeg_signal):
-    frame_size = 256  # Frame size (2 seconds)
-    step_size = 16  # Step size for overlap
-    fs = 128  # Sampling frequency
-    N = len(eeg_signal)  # Total number of samples
-    num_frames = (N - frame_size) // step_size + 1
-
-    frequencies = fftfreq(frame_size, d=1/fs)[:frame_size // 2]
-    times = np.arange(num_frames) * (step_size / fs)
-
-    # list to store FFT results
-    Zxx = np.zeros((len(frequencies), num_frames), dtype=complex)
-    window = np.hamming(frame_size)
 
     # Apply FFT on overlapping frames
     for i in range(num_frames):
@@ -68,10 +55,10 @@ def preprocess(eeg_signal, original_fs, is_emg=False):
     target_fs = 128
     eeg_signal_resampled = eeg_signal
     if(original_fs != target_fs):
-        print("Resampling to to 128Hz")
+        # print("Resampling to to 128Hz")
         num_samples = int(len(eeg_signal) * (target_fs / original_fs))
         eeg_signal_resampled = signal.resample(eeg_signal, num_samples)
-        print(f"Resampled EEG signal shape: {eeg_signal_resampled.shape}")
+        # print(f"Resampled EEG signal shape: {eeg_signal_resampled.shape}")
     
     # psd, frequencies, times = fast_fourier_transform(eeg_signal_resampled)
     psd, frequencies, times = short_fourier_transform(eeg_signal_resampled)
@@ -97,125 +84,98 @@ def preprocess(eeg_signal, original_fs, is_emg=False):
     # standardize log frequency component (Zero Mean, Unit Variance)
     log_psd = np.log1p(filtered_psd)
     standardized_psd = (log_psd - np.mean(log_psd, axis=1, keepdims=True)) / np.std(log_psd, axis=1, keepdims=True)
-    print(f"Final shape {standardized_psd.shape}")
+    # print(f"Final shape {standardized_psd.shape}")
 
     # plot(times, frequencies[freq_mask], standardized_psd)
     return standardized_psd
 
 def get_scorings(scoring_file):
-    scorings = pd.read_csv(scoring_file, header=None, usecols=[1], names=['scorings'])
+    # NOTE: second column of lines 21581 - 21600 in B2.csv used to be ' now replaced with 1
+    scorings = pd.read_csv(scoring_file, header=None, usecols=[2], names=['scorings'])
+    scorings['scorings'] = scorings['scorings'].replace({'w': 1, 'n': 2, 'r': 3, "'": 1})
+    scorings = scorings.infer_objects(copy=False)  # Explicitly infer object types, addresses warning
+    scorings['scorings'] = scorings['scorings'].astype(int)
+    scorings['scorings'] = scorings['scorings'].replace({1: 0, 2: 1, 3: 2})
     return scorings
 
-root_dir = os.getcwd()
-edf_dirA = root_dir + '/training_data/CohortA/recordings/'
-edf_dirB = root_dir + '/training_data/CohortB/recordings/'
-edf_dirC = root_dir + '/training_data/CohortC/recordings/'
-edf_dirD = root_dir + '/training_data/CohortD/recordings/'
-edf_dirs = [edf_dirA]
-scoring_dirA = root_dir + '/training_data/CohortA/scorings/'
-scoring_dirB = root_dir + '/training_data/CohortB/scorings/'
-scoring_dirC = root_dir + '/training_data/CohortC/scorings/'
-scoring_dirD = root_dir + '/training_data/CohortD/scorings/'
-scoring_dirs = [scoring_dirA]
 class EEGDataset(torch.utils.data.Dataset):
     def __init__(self, data_dirs, label_dirs):
+        self.offset = 2
+
         # get data and preprocess
-        self.data = np.empty((48, 0), dtype=np.float32)
+        stacked_signals_list = []
         for edf_dir in data_dirs:
-            print("Processing directory: ", edf_dir)
-            for filename in sorted(os.listdir(edf_dir)):
+            # print("Processing directory: ", edf_dir)
+            for filename in tqdm(sorted(os.listdir(edf_dir)), desc= f"Processing {edf_dir}"):
                 if not filename.endswith('.edf'):
                     raise ValueError("File is not an EDF file")
                 edf_file = os.path.join(edf_dir, filename)
-                print("Processing: ", edf_file)
+                # print("Processing: ", edf_file)
                 with pyedflib.EdfReader(edf_file) as f:
-                    assert f.signals_in_file == 3, "Unexpected number of signals.. there should be 3."
-                    for i in range (3):
+                    num_signals = f.signals_in_file
+                    assert num_signals == 3, "Unexpected number of signals.. there should be 3."
+                    signal = []
+                    for i in range (num_signals):
                         original_fs = f.getSampleFrequency(i)
                         eeg_signal = f.readSignal(i)
-                        # print(f"EEG signal shape: {eeg_signal.shape}")
-                        # print(f"Length of EEG signal: {len(eeg_signal)}")
-                        # print(f"Original frequency: {original_fs}")
                         processed_data = preprocess(eeg_signal, original_fs, is_emg=(i == 2))
-                        self.data = np.concatenate((self.data, np.array(processed_data)), axis=1)
+                        # print(f"Processed data shape: {processed_data.shape}")
+                        signal.append(processed_data)
+                    stacked_signals = np.stack(signal, axis=0)
+                    stacked_signals_list.append(stacked_signals)
             print("")
-        print(f"Length of data: {self.data.shape}")
-        print(f"Shape of data: {self.data.shape}")
+        self.data = np.concatenate(stacked_signals_list, axis=-1)
+        # print(f"Shape of data: {self.data.shape}")
 
+        # W -> 1, N -> 2, R -> 3
         self.all_scorings = []
         for scoring_dir in label_dirs:
             for filename in sorted(os.listdir(scoring_dir)):
                 if not filename.endswith('.csv'):
                     raise ValueError("File is not a CSV file")
                 scoring_file = os.path.join(scoring_dir, filename)
-                print("Processing: ", scoring_file)
+                # print("Processing: ", scoring_file)
                 scorings = get_scorings(scoring_file)
-                # print(scorings[21590:])
                 assert len(scorings) == 21600
                 self.all_scorings.extend(scorings['scorings'])
         
-        self.all_scorings = np.array(self.all_scorings, dtype=np.str_)
-        print(f"Shape of scorings: {self.all_scorings.shape}")
+        self.all_scorings = np.array(self.all_scorings, dtype=np.int_)
+        # print(f"Shape of scorings: {self.all_scorings.shape}")
 
 
     def __len__(self):
-        return len(self.all_scorings)
+        return len(self.all_scorings) - (2 * self.offset)
 
     def __getitem__(self, index):
-        start_idx = index * 32
-        end_idx = start_idx + 32
+        # NOTE: for each sample we will be taking 5 windows of 32x48
+        # so for sample t, we will be taking t-2, t-1, t, t+1, t+2
+        # start_idx doesn't take into account offset to avoid edge case at index 0, 1, n-2, n-1
+        # the label index will take into account offset; i.e. label index starts at 2
+        window_size = 32
+
+        start_idx = index * window_size
+        end_idx = start_idx + (5 * window_size)
+        data_item = self.data[:, :, start_idx:end_idx]
         
-        # slice data for 48x32 item -> we will need 5 of these
-        data_item = self.data[:, start_idx:end_idx]
-        label_item = self.all_scorings[index]
+        label_index = index + self.offset
+        label_item = self.all_scorings[label_index]
+
         return data_item, label_item
 
-def load_dataset(data_dir, batch_size):
-    pass
-
 if __name__ == '__main__':
+    root_dir = os.getcwd()
+    edf_dirA = root_dir + '/training_data/CohortA/recordings/'
+    edf_dirB = root_dir + '/training_data/CohortB/recordings/'
+    edf_dirC = root_dir + '/training_data/CohortC/recordings/'
+    edf_dirD = root_dir + '/training_data/CohortD/recordings/'
+    edf_dirs = [edf_dirA]
+    scoring_dirA = root_dir + '/training_data/CohortA/scorings/'
+    scoring_dirB = root_dir + '/training_data/CohortB/scorings/'
+    scoring_dirC = root_dir + '/training_data/CohortC/scorings/'
+    scoring_dirD = root_dir + '/training_data/CohortD/scorings/'
+    scoring_dirs = [scoring_dirA]
+
     dataset = EEGDataset(edf_dirs, scoring_dirs)
-
-    # for cohort A and B @ 256 Hz hmmm
-    # 1382401 / 10800 / 32 = 4 second epochs
-    # for cohort C and D
-    # 691201 / 21600 = 32
-    # edf_file = edf_dirA + "A1.edf"
-    # with pyedflib.EdfReader(edf_file) as f:
-    #     eeg_signal = f.readSignal(2)
-    #     original_fs = f.getSampleFrequency(2)
-    #     print(f"EEG signal shape: {eeg_signal.shape}")
-    #     print(f"original frequency: {original_fs}")
-    #     preprocess(eeg_signal, original_fs, is_emg=True)
-
-    # for edf_dir in edf_dirs:
-    #     print("Processing directory: ", edf_dir)
-    #     for filename in sorted(os.listdir(edf_dir)):
-    #         if not filename.endswith('.edf'):
-    #             raise ValueError("File is not an EDF file")
-    #         edf_file = os.path.join(edf_dir, filename)
-    #         print("Processing: ", edf_file)
-    #         with pyedflib.EdfReader(edf_file) as f:
-    #             num_signals = f.signals_in_file
-    #             # print(f"Number of signals: {num_signals}")
-    #             for i in range (3):
-    #                 original_fs = f.getSampleFrequency(i)
-    #                 eeg_signal = f.readSignal(i)
-    #                 # print(f"EEG signal shape: {eeg_signal.shape}")
-    #                 # print(f"Length of EEG signal: {len(eeg_signal)}")
-    #                 # print(f"Original frequency: {original_fs}")
-    #                 preprocess(eeg_signal, original_fs, is_emg=(i == 2))
-    #     print("")
-
-    # all_scorings = []
-    # for scoring_dir in scoring_dirs:
-    #     for filename in sorted(os.listdir(scoring_dir)):
-    #         if not filename.endswith('.csv'):
-    #             raise ValueError("File is not a CSV file")
-    #         scoring_file = os.path.join(scoring_dir, filename)
-    #         print("Processing: ", scoring_file)
-    #         scorings = get_scorings(scoring_file)
-    #         # print(scorings[21590:])
-    #         assert len(scorings) == 21600
-    #         all_scorings.append(scorings)
-    # print(len(all_scorings))
+    datapoint, label = dataset.__getitem__(0)
+    print(datapoint.shape, label)
+    print(f"Length of dataset: {dataset.__len__()}")
